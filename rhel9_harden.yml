@@ -1,0 +1,74 @@
+---
+- name: Harden RHEL 9
+  hosts: all
+  become: true  # Run tasks with sudo
+
+  tasks:
+    - name: Update the system
+      yum:
+        name: "*"
+        state: latest
+
+    - name: Install necessary packages
+      yum:
+        name: aide
+        state: present
+
+    - name: Initialize AIDE
+      command: aide --init
+      args:
+        creates: /var/lib/aide/aide.db.gz
+      register: aide_init_result
+
+    - name: Move AIDE database
+      command: mv /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz
+      when: aide_init_result.rc == 0
+
+    - name: Disable unused filesystems
+      copy:
+        content: |
+          install cramfs /bin/true
+          install freevxfs /bin/true
+          install jffs2 /bin/true
+          install hfs /bin/true
+          install hfsplus /bin/true
+          install squashfs /bin/true
+          install udf /bin/true
+        dest: /etc/modprobe.d/custom_disable_unused_fs.conf
+      notify: Reconfigure modprobe
+
+    - name: Configure auditd
+      blockinfile:
+        path: /etc/audit/rules.d/audit.rules
+        block: |
+          -w /etc/passwd -p wa -k identity
+          -w /etc/group -p wa -k identity
+          -w /etc/shadow -p wa -k identity
+          -w /etc/sudoers -p wa -k identity
+      notify: Restart auditd
+
+    - name: Schedule AIDE daily cron job
+      cron:
+        name: Run AIDE daily
+        job: "/usr/sbin/aide --check"
+        minute: 0
+        hour: 0
+        user: root
+
+    - name: Configure sysctl settings
+      template:
+        src: sysctl.conf.j2
+        dest: /etc/sysctl.conf
+      notify: Apply sysctl settings
+
+  handlers:
+    - name: Reconfigure modprobe
+      command: /sbin/modprobe -r -a && /sbin/modprobe -a
+
+    - name: Restart auditd
+      systemd:
+        name: auditd
+        state: restarted
+
+    - name: Apply sysctl settings
+      command: sysctl -p
